@@ -1,0 +1,1569 @@
+<!-- removed shadows and reduced reflector quality and added stats -->
+<!-- new lowpoly tree + tree lod-->
+<!-- add particles to tree model with light-->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Night Forest Scene with Glowing Network</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #toggleViewBtn {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 2;
+            padding: 10px 20px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: #ffffff;
+            border: none;
+            cursor: pointer;
+            display: none;
+        }
+
+        #loadingScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 3;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            font-size: 24px;
+        }
+
+        #progressBar {
+            width: 50%;
+            height: 20px;
+            background-color: #333;
+            margin-top: 20px;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        #progressBarFill {
+            height: 100%;
+            width: 0%;
+            background-color: #0f0;
+            transition: width 0.3s ease;
+        }
+    </style>
+
+    <!-- Import map for defining module paths -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/",
+                "three/addons/objects/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/objects/",
+                "three/addons/controls/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/controls/",
+                "three/addons/loaders/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/loaders/",
+                "three/addons/utils/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/utils/",
+                "three/addons/postprocessing/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/postprocessing/",
+                "three/addons/shaders/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/shaders/"
+            }
+        }
+    </script>
+    <!-- Include Delaunator library for Delaunay triangulation -->
+    <script src="https://cdn.jsdelivr.net/npm/delaunator@5.0.0/delaunator.min.js"></script>
+    <script src="Stats.min.js"></script>
+</head>
+
+<body>
+    <div id="loadingScreen">
+        Loading Scene...
+        <div id="progressBar">
+            <div id="progressBarFill"></div>
+        </div>
+    </div>
+    
+    <button id="scroll to mone" style="position: absolute;bottom: 2em;border: 5px solid rgba(56, 248, 255, 0.37);background-color: rgba(0, 66, 87, 0.301);padding: 1em;color:white;font-size: 150%;font-weight: bold;font-family:cursive;">
+        Scroll to move
+    </button>
+    <button id="toggleViewBtn">Switch to Overview</button>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
+        import { Reflector } from 'three/addons/objects/Reflector.js'; // Import Reflector for reflective ground
+        import { Line2 } from 'three/addons/lines/Line2.js'; // ahmed
+        import { LineMaterial } from 'three/addons/lines/LineMaterial.js';  // ahmed
+        import { LineGeometry } from 'three/addons/lines/LineGeometry.js';  // ahmed
+
+        const stats = new Stats();
+        stats.setMode(0); // 0 = FPS, 1 = ms, 2 = memory (if supported)
+        stats.domElement.style.position = 'absolute';
+        stats.domElement.style.right = '0px';
+        stats.domElement.style.top = '0px';
+        document.body.appendChild(stats.domElement);
+        document.getElementById("stats").style.width = "fit-content";
+        document.getElementById("stats").style.top = "10px";
+        document.getElementById("fpsText").style.fontSize = "200%";
+        document.getElementById("fpsGraph").style.marginTop = "2em";
+
+        // Scene Setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000); // Set background to black
+
+        // Camera setup
+        const forestRadius = 240;
+        const chunkSize = 10; // Size of each chunk
+        const renderDistance = chunkSize * 3; // Render distance tied to chunk size (camera can see 3 chunks away)
+        const cameraFar = 100; // Increase far clipping plane to include the skybox
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, cameraFar);
+        camera.position.set(-forestRadius, 10, 0);
+        const chunks = {}; // Object to store chunks
+
+        // Fog effect with a bluish color to mask chunk popping
+        const fogColor = new THREE.Color(0x001933); // Bluish fog color
+
+        // Adjust fog to fade out objects before the render distance
+        const fogNear = 100; // Start fog closer to the camera
+        const fogFar = 400;  // Fog reaches maximum opacity at this distance
+        scene.fog = new THREE.Fog(fogColor, fogNear, fogFar);
+
+        // Renderer setup
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(fogColor);
+        renderer.shadowMap.enabled = false;
+        // renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // Post-processing setup
+        const composer = new EffectComposer(renderer);
+        const renderPass = new RenderPass(scene, camera);
+        composer.addPass(renderPass);
+
+        const bloomPass = new UnrealBloomPass(
+            new THREE.Vector2(window.innerWidth, window.innerHeight),
+            0.8,  // strength
+            0.5,  // radius
+            0.5   // threshold
+        );
+        composer.addPass(bloomPass);
+
+        const bokehPass = new BokehPass(scene, camera, {
+            focus: 50.0,
+            aperture: 0.00002,
+            maxblur: 0.01,
+            width: window.innerWidth,
+            height: window.innerHeight
+        });
+        composer.addPass(bokehPass);
+
+        // Controls
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.1;
+        controls.enablePan = false;
+        controls.enableZoom = false;
+
+        // Modify existing ambient light intensity
+        const ambientLight = new THREE.AmbientLight(0x404040, 4); // Increase intensity to 2
+        scene.add(ambientLight);
+
+        // Modify moonlight intensity
+        const moonlight = new THREE.DirectionalLight(0xa0c4ff, 4); // Increase intensity to 2
+        moonlight.position.set(100, 200, -100);
+        moonlight.castShadow = false;
+        // scene.add(moonlight);
+
+        // Add additional point lights for more illumination
+        const additionalLight1 = new THREE.PointLight(0xffffff, 1, 500);
+        additionalLight1.position.set(-200, 50, -200);
+        scene.add(additionalLight1);
+
+        const additionalLight2 = new THREE.PointLight(0xffffff, 1, 500);
+        additionalLight2.position.set(200, 50, 200);
+        scene.add(additionalLight2);
+
+        const additionalLight3 = new THREE.PointLight(0xffffff, 0.8, 500);
+        additionalLight3.position.set(0, 75, 0);
+        scene.add(additionalLight3);
+
+
+        // Ground Plane with reflective surface
+        const textureLoader = new THREE.TextureLoader();
+        const groundGeometry = new THREE.PlaneGeometry(500, 500);
+
+        // Load ground texture
+        const groundTexture = textureLoader.load('https://threejs.org/examples/textures/terrain/grasslight-big.jpg', () => {
+            groundTexture.wrapS = groundTexture.wrapT = THREE.RepeatWrapping;
+            groundTexture.repeat.set(25, 25);
+        });
+
+        // Optional: Load a valid normal map if available
+        // For demonstration, we'll use a different normal map
+        // const groundNormalMap = textureLoader.load('https://threejs.org/examples/textures/terrain/grasslight-big-nm.jpg', () => {
+        //     groundNormalMap.wrapS = groundNormalMap.wrapT = THREE.RepeatWrapping;
+        //     groundNormalMap.repeat.set(25, 25);
+        // });
+
+        const groundMaterial = new THREE.MeshStandardMaterial({
+            map: groundTexture,
+            // normalMap: groundNormalMap,
+            roughness: 0.8,
+            metalness: 0.3, // Increased metalness for reflectivity
+        });
+
+        // Create a reflective ground using Reflector
+        const groundReflector = new Reflector(new THREE.PlaneGeometry(500, 500), {
+            clipBias: 0.003,
+            textureWidth: window.innerWidth * window.devicePixelRatio,
+            textureHeight: window.innerHeight * window.devicePixelRatio,
+            color: 0x77aa77
+        });
+        // groundReflector.roughness = 0.3; // Increase roughness to blur reflection
+        // groundReflector.metalness = 0.5; // Lower metalness to reduce reflection intensity
+        groundReflector.rotation.x = -Math.PI / 2;
+        groundReflector.position.y = 0.1 // Slightly above to prevent z-fighting
+        scene.add(groundReflector);
+
+        // Optionally, add a non-reflective ground mesh for shadows
+        const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
+        groundMesh.rotation.x = -Math.PI / 2;
+        groundMesh.receiveShadow = false;
+        // scene.add(groundMesh);
+
+        // Skybox for Stars and Moon without fog effect
+        const skyGeometry = new THREE.SphereGeometry(1000, 64, 64); // Increased segments for smoother stars
+        const skyMaterial = new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            side: THREE.BackSide,
+            fog: false // Prevent fog from affecting the skybox
+        });
+        const skybox = new THREE.Mesh(skyGeometry, skyMaterial);
+        scene.add(skybox);
+
+        // Adding the Moon to skybox
+        const moonGeometry = new THREE.SphereGeometry(30, 32, 32);
+        const moonMaterial = new THREE.MeshBasicMaterial({ color: 0xf0e68c, fog: false });
+        const moon = new THREE.Mesh(moonGeometry, moonMaterial);
+        moon.position.set(-300, 500, -800); // Position it within the skybox
+        skybox.add(moon);
+
+        // Load star texture
+        let starTexture;
+        textureLoader.load('https://threejs.org/examples/textures/sprites/disc.png', (texture) => {
+            starTexture = texture;
+            createStars(10000); // Increased star count
+        });
+
+        function createStars(count) {
+            // Stars as part of the skybox
+            const starGeometry = new THREE.BufferGeometry();
+            const starCount = count;
+            const starPositions = new Float32Array(starCount * 3);
+
+            for (let i = 0; i < starCount; i++) {
+                const theta = THREE.MathUtils.randFloatSpread(360);
+                const phi = THREE.MathUtils.randFloatSpread(360);
+                const radius = 1000; // Same as skybox radius
+
+                const x = radius * Math.sin(theta) * Math.cos(phi);
+                const y = radius * Math.sin(theta) * Math.sin(phi);
+                const z = radius * Math.cos(theta);
+
+                starPositions[i * 3] = x;
+                starPositions[i * 3 + 1] = y;
+                starPositions[i * 3 + 2] = z;
+            }
+
+            starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+            const starMaterial = new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 1.5,
+                map: starTexture,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                fog: false
+            });
+            const stars = new THREE.Points(starGeometry, starMaterial);
+            skybox.add(stars);
+        }
+
+        // Pathway Curve for Camera
+        const pathwayControlPoints = [];
+        const numPoints = 10;
+        let currentPosition = new THREE.Vector3(-forestRadius, 0.1, 0);
+        pathwayControlPoints.push(currentPosition.clone());
+
+        for (let i = 1; i <= numPoints; i++) {
+            const dx = (forestRadius * 2) / numPoints;
+            currentPosition = currentPosition.clone();
+            currentPosition.x += dx;
+            const dz = (Math.random() - 0.5) * forestRadius * 0.5;
+            currentPosition.z += dz;
+            pathwayControlPoints.push(currentPosition.clone());
+        }
+
+        const pathwayCurve = new THREE.CatmullRomCurve3(pathwayControlPoints);
+        pathwayCurve.curveType = 'catmullrom';
+        pathwayCurve.tension = 0.5;
+        const pathwayPointsSampled = pathwayCurve.getSpacedPoints(200);
+
+        function getRandomColorBetweenRedAndYellow() {
+            // Red (255, 0, 0) and Yellow (255, 255, 0) in RGB
+            const yellow = new THREE.Color(0xffff44);
+            const green = new THREE.Color(0x44ff44);
+            const blue = new THREE.Color(0xa8f7ff);
+
+            // Generate a random value between 0 and 1
+            const t = Math.random();
+            if (t < .70) {
+                return yellow;
+            }
+            if (t < .9) {
+                return green;
+            }
+            // Interpolate between red and yellow
+            return blue;
+        }
+
+
+        // Trees Generation using 'tree.gltf' model
+
+        // CHUNK RENDERING SETUP
+
+        const loadedChunks = {}; // Keep track of which chunks are loaded
+
+        const numTrees = 800;
+        const minTreeDistance = 4;
+        const minDistanceFromPath = 5;
+
+        function getRandomPosition(radius, pathwayPoints, maxDistanceFromPath = chunkSize * 4, gridDivisions = 30, randomness = 0.4) {
+            // Calculate the grid cell size based on the radius and number of divisions
+            const cellSize = (radius * 2) / gridDivisions;
+
+            let position, distanceToPath;
+
+            // Loop until we find a position near the pathway
+            do {
+                // Randomly pick a grid cell
+                const gridX = Math.floor(Math.random() * gridDivisions);
+                const gridZ = Math.floor(Math.random() * gridDivisions);
+
+                // Base position in the center of the chosen grid cell
+                const baseX = -radius + gridX * cellSize + cellSize / 2;
+                const baseZ = -radius + gridZ * cellSize + cellSize / 2;
+
+                // Apply a slight random offset within the cell to avoid perfect alignment
+                const offsetX = (Math.random() - 0.5) * cellSize * randomness;
+                const offsetZ = (Math.random() - 0.5) * cellSize * randomness;
+
+                // Create the proposed tree position
+                position = new THREE.Vector3(baseX + offsetX, 0, baseZ + offsetZ);
+
+                // Calculate the distance to the closest point on the pathway
+                distanceToPath = pathwayPoints.reduce((minDistance, pathPoint) => {
+                    const distance = position.distanceTo(pathPoint);
+                    return Math.min(minDistance, distance);
+                }, Infinity);
+
+            } while (distanceToPath > maxDistanceFromPath || distanceToPath < minDistanceFromPath);
+
+            return position;
+        }
+
+        function getChunkIndex(position) {
+            const chunkX = Math.floor((position.x + forestRadius) / chunkSize);
+            const chunkZ = Math.floor((position.z + forestRadius) / chunkSize);
+            return `${chunkX}_${chunkZ}`;
+        }
+
+        const treePositions = []; // This will store all tree data
+
+        let treeModel; // Global variable to hold the loaded tree model
+        let geometries = []; // Array to store unique geometries
+        let materials = []; // Array to store corresponding materials
+
+        // Declare lineSegments in a scope accessible to both functions
+        const lineSegments = []; // Array to store line segments
+
+        // Preload elements
+        const loadingScreen = document.getElementById('loadingScreen');
+        const progressBarFill = document.getElementById('progressBarFill');
+        const toggleViewBtn = document.getElementById('toggleViewBtn');
+
+        const loader = new GLTFLoader();
+        loader.load('tree.gltf', (gltf) => {
+            treeModel = gltf.scene;
+
+            // Extract unique geometries and materials
+            const geometryMaterialMap = new Map();
+            let geometryIndex = 0;
+
+
+            treeModel.traverse((child) => {
+                if (child.isMesh) {
+                    let key = `${child.geometry.uuid}_${child.material.uuid}`;
+                    if (!geometryMaterialMap.has(key)) {
+                        geometryMaterialMap.set(key, geometryIndex++);
+                        
+                        if (child.name === '_treein') {
+                            
+                            // child.material.visible = false;
+                        } else if (child.name === '_treeinup') {
+                            // child.material.visible = false;
+                        } else if (child.name === '_treeout' ) { //|| child.name === 'tree001' || child.name === 'tree001_1'
+                            // child.material.visible = false;
+                            // child.material.color = new THREE.Color(0xffffff);
+                            // // child.material.emissive = new THREE.Color(0xccff00); // Set emissive color (e.g., green)
+                            child.material.emissiveIntensity = 1; // Adjust intensity+
+                            child.material.transparent = true;
+                            child.material.opacity = 1;
+                        } else {
+                            // child.material.color = getRandomColorBetweenRedAndYellow();
+                            // child.material.emissive = child.material.color; // Set emissive color (e.
+                            child.material.emissiveIntensity = 1.0; // Adjust intensity+
+                            child.material.transparent = true;
+                            child.material.opacity = 1;
+                        }
+
+                        geometries.push(child.geometry);
+                        materials.push(child.material);
+
+
+                        // console.log(materials.length);
+                        // console.log('Child:', child.name, child.material.name);
+                    }
+                    child.userData.geometryIndex = geometryMaterialMap.get(key);
+                }
+            });
+            // console.log(geometries.length);
+            // console.log(materials.length);
+
+            // Simplify geometries for different levels of detail
+            const lowDetailGeometries = geometries.map((geometry) => {
+                const simplifiedGeometry = geometry.clone();
+                simplifiedGeometry.scale(0.01, 0.01, 0.01); // Example: scale down for simplicity
+                return simplifiedGeometry;
+            });
+
+            for (let i = 0; i < numTrees; i++) {
+                let position = getRandomPosition(forestRadius, pathwayPointsSampled);
+
+                let retryCount = 0;
+                while (retryCount < 10 && (
+                    treePositions.some(existingPos => existingPos.position.distanceTo(position) < minTreeDistance) ||
+                    pathwayPointsSampled.some(pathPoint => pathPoint.distanceTo(position) < minDistanceFromPath)
+                )) {
+                    position = getRandomPosition(forestRadius, pathwayPointsSampled);
+                    retryCount++;
+                }
+
+                if (retryCount < 10) {
+                    const scale = 2 + Math.random() * .3;
+                    const rotationY = Math.random() * Math.PI * 2;
+
+                    const lod = new THREE.LOD();
+
+                    // Add high-detail geometry
+                    const highDetailMesh = new THREE.Mesh(geometries[0], materials[0]); // Example: use the first geometry/material
+                    highDetailMesh.scale.set(scale, scale, scale);
+                    highDetailMesh.position.copy(position);
+                    highDetailMesh.rotation.y = rotationY;
+                    lod.addLevel(highDetailMesh, 0); // High detail close up
+
+                    // Add low-detail geometry
+                    const lowDetailMesh = new THREE.Mesh(lowDetailGeometries[0], materials[0]);
+                    lowDetailMesh.scale.set(scale, scale, scale);
+                    lowDetailMesh.position.copy(position);
+                    lowDetailMesh.rotation.y = rotationY;
+                    lod.addLevel(lowDetailMesh, 10); // Low detail farther away
+
+                    // scene.add(lod);
+
+                    const chunkIndex = getChunkIndex(position);
+
+                    for (let i = 0; i < geometries.length - 1; i++) {
+                        const treeData = {
+                            position: position.clone(),
+                            scale: scale,
+                            rotationY: rotationY,
+                            geometryIndex: i,//Math.floor(Math.random() * geometries.length), // Random geometry for diversity
+                            connections: 0 // Initialize connections count for maxLinesPerNode enforcement
+                        };
+
+                        if (i === 0) {
+                            if (!chunks[chunkIndex]) {
+                                chunks[chunkIndex] = {
+                                    trees: [],
+                                    meshes: [] // Array to hold InstancedMeshes per geometry
+                                };
+                            }
+                            treePositions.push(treeData);
+                        }
+                        chunks[chunkIndex].trees.push(treeData);
+                    }
+                }
+            }
+
+            // lines
+            const lines = new THREE.Group();
+            const connections = new Set();
+            const points = [];
+            const pointConnections = []; // Track the number of connections for each tree
+
+            function addConnection(i, j) {
+                // Add the connection in sorted order (i < j)
+                const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+                connections.add(key);
+                pointConnections[i]++;
+                pointConnections[j]++;
+            }
+
+            let unmetConnections = true;
+
+            function createTreeConnections() {
+                // Generate random points on the ground
+                // Use tree positions as points for connection
+
+                treePositions.forEach((tree, index) => {
+                    const { position } = tree;
+                    points.push(position.clone()); // Add the tree position as a point
+                    pointConnections.push(0); // Initialize connections to 0
+                });
+
+                // Function to check if two line segments intersect
+                function checkLineIntersection(line1, line2) {
+                    // Access the points of each line
+                    const points1 = line1.userData.points;
+                    const points2 = line2.userData.points;
+
+                    for (let i = 3; i < points1.length - 4; i++) {
+                        for (let j = 3; j < points2.length - 4; j++) {
+                            const segment1Start = points1[i];
+                            const segment1End = points1[i + 1];
+                            const segment2Start = points2[j];
+                            const segment2End = points2[j + 1];
+
+                            if (segmentsIntersect(segment1Start, segment1End, segment2Start, segment2End)) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+
+                // Function to check intersection of two line segments in 3D
+                function segmentsIntersect(p1, p2, q1, q2) {
+                    // Vector math can be used here; simplified approach is below:
+                    // Calculate the direction vectors
+                    const r = p2.clone().sub(p1);
+                    const s = q2.clone().sub(q1);
+                    const pq = q1.clone().sub(p1);
+
+                    const crossRS = r.clone().cross(s).lengthSq();
+                    if (crossRS === 0) return false; // Parallel segments
+
+                    const t = pq.clone().cross(s).dot(new THREE.Vector3(1, 1, 1)) / crossRS;
+                    const u = pq.clone().cross(r).dot(new THREE.Vector3(1, 1, 1)) / crossRS;
+
+                    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+                }
+
+                // Function to create a glowing zig-zag line
+                function createZigZagLine(start, end, color) {
+                    const segments = ~~start.distanceTo(end) / 2; // Number of zig-zag segments
+                    const points = [start];
+                    for (let i = 1; i < segments; i++) {
+                        const t = i / segments;
+                        const midX = THREE.MathUtils.lerp(start.x, end.x, t) + Math.random() * 2 - 1;
+                        const midY = THREE.MathUtils.lerp(start.y, end.y, t) + .11;
+                        const midZ = THREE.MathUtils.lerp(start.z, end.z, t) + Math.random() * 2 - 1;
+                        points.push(new THREE.Vector3(midX, midY, midZ));
+                    }
+                    points.push(end);
+
+                    const geometry = new LineGeometry();
+                    geometry.setPositions(points.flatMap(p => [p.x, p.y, p.z]));
+
+                    const material = new LineMaterial({
+                        color: color,
+                        linewidth: 4,
+                        transparent: true,
+                        opacity: 0.8,
+                    });
+                    material.resolution.set(window.innerWidth, window.innerHeight);
+
+                    const line = new Line2(geometry, material);
+                    line.userData.points = points; // Store points for easy access
+                    return line;
+                }
+
+                // Connect points within distance, limiting each point to 5 connections
+                const maxConnections = 3;
+                const minConnections = 5;
+                const minDistance = 1;
+                const maxDistance = 40;
+                let counter1 = 0;
+                // while (unmetConnections && counter1 < 50) { // 
+                //     unmetConnections = false;
+                //     console.log("counter1" + counter1++);
+                for (let i = 0; i < points.length; i++) {
+                    if (pointConnections[i] < maxConnections) {
+                        unmetConnections = true; // Keep looping until all points meet the requirement
+
+                        // Find a suitable connection
+                        let counter2 = 0;
+                        // while (pointConnections[i] < minConnections ) { // && counter2 < 10
+                        // console.log("counter2" + counter2++);
+                        for (let j = 0; j < points.length; j++) {
+                            if (
+                                i !== j &&
+                                !connections.has(`${i}-${j}`) &&
+                                !connections.has(`${j}-${i}`) &&
+                                pointConnections[j] < maxConnections &&
+                                points[i].distanceTo(points[j]) <= maxDistance &&
+                                points[i].distanceTo(points[j]) >= minDistance
+                            ) {
+                                const newLine = createZigZagLine(points[i], points[j], "#ffff00");
+
+                                // Check for intersections with existing lines
+                                if (lines.children.every(existingLine => !checkLineIntersection(existingLine, newLine))) {
+                                    lines.add(newLine);
+                                    addConnection(i, j);
+                                    if (pointConnections[i] >= maxConnections)
+                                        break; // Move to the next point
+                                } else {
+                                    // console.log("intersection found");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // line between points  --------------------
+
+                // Function to sample a random point on a line
+                function getRandomPointOnLine(line) {
+                    const points = line.userData.points; // Access stored points
+                    const index = Math.floor(.5 * (points.length - 1));
+                    // const index = Math.floor(Math.random() * (points.length - 1));
+                    const t = Math.random(); // Random position within the segment
+                    return new THREE.Vector3().lerpVectors(points[index], points[index + 1], t);
+                }
+
+                // Function to connect two random points on different lines
+                function connectRandomPoints(linesGroup) {
+                    const lineChildren = linesGroup.children.filter(child => child instanceof Line2);
+
+                    // Ensure we have at least two lines to connect
+                    if (lineChildren.length < 2) {
+                        console.warn("Not enough lines to create a connection");
+                        return;
+                    }
+
+                    // Select two random lines
+                    const line1 = lineChildren[Math.floor(Math.random() * lineChildren.length)];
+                    let line2;
+
+                    do {
+                        line2 = lineChildren[Math.floor(Math.random() * lineChildren.length)];
+                    } while (line1 === line2); // Ensure the two lines are different
+
+                    // Get random points on both lines
+                    const point1 = getRandomPointOnLine(line1);
+                    const point2 = getRandomPointOnLine(line2);
+
+                    // Create a new zig-zag line between the two points
+                    const newLine = createZigZagLine(point1, point2, "#ffff00");
+                    linesGroup.add(newLine); // Add the new line to the lines group
+                }
+
+                // Connect random points on different lines
+                // for (let i = 0; i < 50; i++) {
+                //     connectRandomPoints(lines);
+                // }
+
+            }
+            createTreeConnections();
+            scene.add(lines);
+
+            // Create the tree network
+            createTreeNetwork();
+
+            // Create particles over the trees
+            createTreeParticles();
+
+            // Start loading initial chunks
+            loadInitialChunks();
+
+        }, undefined, (error) => {
+            console.error('An error occurred while loading the tree model:', error);
+        });
+
+        // Function to create the network of lines connecting the trees
+        function createTreeNetwork() {
+            const maxEdgeLength = chunkSize * 4;              // Maximum length for connections
+            const maxLinesPerNode = 5;                        // Allow up to 5 connections per node
+            const minDistanceFromTree = 2;                    // Minimum distance from tree base
+            const branchingProbability = 0.6;                 // Probability for a branch to split off
+            const irregularityFactor = 2;                     // Random displacement for irregular direction
+            const networkGroup = new THREE.Group();           // Group to hold all network lines and dots
+            const dotDensity = 2000;                          // Number of random glowing dots to generate
+
+            // Define material for the glowing network lines
+            // Updated lineMaterial with enhanced visibility
+            const lineMaterial = new THREE.MeshBasicMaterial({
+                color: 0xffd700, // Bright yellow color
+                transparent: true,
+                opacity: 0.8,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending, // Makes lines glow
+            });
+
+
+
+
+
+            // Track nodes and their connection counts to limit connections per node
+            const nodeConnections = new Map();                // Track number of connections per node
+            const connectedNodes = new Map();                 // Track existing connections to prevent duplicates
+
+            // Recursive branching function
+            function createBranch(startNode, depth = 0) {
+                if (depth > 5) return; // Limit recursion depth
+
+                // Enforce maxLinesPerNode
+                if ((nodeConnections.get(startNode) || 0) >= maxLinesPerNode) return;
+
+                // Determine number of connections for this node (random up to maxLinesPerNode)
+                const availableConnections = maxLinesPerNode - (nodeConnections.get(startNode) || 0);
+                const numConnections = 1 + Math.floor(Math.random() * availableConnections);
+
+                for (let i = 0; i < numConnections; i++) {
+                    const targetNode = getRandomNearbyNode(startNode);
+
+                    if (!targetNode) continue;
+
+                    // Enforce maxLinesPerNode for targetNode
+                    if ((nodeConnections.get(targetNode) || 0) >= maxLinesPerNode) continue;
+
+                    // Check if the connection already exists
+                    const connectionKey = `${startNode.position.x},${startNode.position.z}-${targetNode.position.x},${targetNode.position.z}`;
+                    if (connectedNodes.has(connectionKey)) continue;
+                    connectedNodes.set(connectionKey, true);
+
+                    // Update connections count
+                    nodeConnections.set(startNode, (nodeConnections.get(startNode) || 0) + 1);
+                    nodeConnections.set(targetNode, (nodeConnections.get(targetNode) || 0) + 1);
+
+                    // Define breakpoints with irregular direction between startNode and targetNode
+                    const numBreakpoints = 2 + Math.floor(Math.random() * 3); // 2 to 4 breakpoints
+                    const breakpoints = [startNode.position.clone()];
+
+                    let validPath = true;
+
+                    for (let j = 1; j <= numBreakpoints; j++) {
+                        const alpha = j / (numBreakpoints + 1);
+                        const point = new THREE.Vector3().lerpVectors(startNode.position, targetNode.position, alpha);
+
+                        // Introduce irregularity
+                        point.x += (Math.random() - 0.5) * irregularityFactor;
+                        point.z += (Math.random() - 0.5) * irregularityFactor;
+
+                        // Check minimum distance from any tree
+                        if (isPointTooCloseToTree(point, minDistanceFromTree, startNode, targetNode)) {
+                            validPath = false;
+                            break;
+                        }
+
+                        breakpoints.push(point);
+                    }
+
+                    if (!validPath) continue;
+
+                    breakpoints.push(targetNode.position.clone());
+
+                    // Create line segments between breakpoints
+                    for (let k = 0; k < breakpoints.length - 1; k++) {
+                        const segmentStart = breakpoints[k];
+                        const segmentEnd = breakpoints[k + 1];
+                        const segment = new THREE.Line3(segmentStart, segmentEnd);
+
+                        // Check if the segment is too close to any tree
+                        if (isLineTooCloseToTrees(segment, minDistanceFromTree, startNode, targetNode)) {
+                            validPath = false;
+                            break;
+                        }
+
+                        const segmentMesh = createLineSegment(segment, lineMaterial);
+                        networkGroup.add(segmentMesh);
+
+                        // Store the line segment for particle placement
+                        lineSegments.push(segment);
+                    }
+
+                    if (!validPath) continue;
+
+                    // Recursively create branches from the target node
+                    if (Math.random() < branchingProbability) {
+                        createBranch(targetNode, depth + 1);
+                    }
+                }
+            }
+
+            // ahmed hidden orange connecting lines
+            // Initialize network by connecting each node
+            // treePositions.forEach((startNode) => {   
+            //     createBranch(startNode);
+            // });
+
+            // Add random glowing dots across the map
+            createRandomGlowDots(dotDensity, networkGroup);
+
+            // scene.add(networkGroup);
+
+            function createTreeAirCurrent(tree) {
+                const radius = tree.scale * 1.1 + 0.02; // Add a gap to avoid overlapping with the tree
+                const height = 0.5; // Air current height (1 meter above the base)
+
+                const airGeometry = new THREE.CylinderGeometry(radius, radius, height, 32, 1, true);
+                const airMaterial = new THREE.ShaderMaterial({
+                    uniforms: {
+                        color: { value: new THREE.Color(0x00ff00) }, // Greenish glow
+                        time: { value: 0 },
+                        treeHeight: { value: height },
+                    },
+                    vertexShader: `
+                            varying vec3 vPosition;
+                            void main() {
+                                vPosition = position;
+                                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                            }
+                        `,
+                                    fragmentShader: `
+                            uniform vec3 color;
+                            uniform float time;
+                            uniform float treeHeight;
+                            varying vec3 vPosition;
+
+                            void main() {
+                                float distance = length(vec2(vPosition.x, vPosition.z));
+                                float alpha = 0.5 + 0.5 * sin(time + vPosition.y * 3.0); // Vertical flowing animation
+                                float edgeFade = smoothstep(0.0, treeHeight, vPosition.y); // Fade as it goes up
+                                gl_FragColor = vec4(color, alpha * edgeFade); // Glowing air with fade
+                            }
+                        `,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                });
+
+                const airMesh = new THREE.Mesh(airGeometry, airMaterial);
+                airMesh.position.copy(tree.position);
+                airMesh.position.y += height / 2; // Center the air above the ground
+
+                scene.add(airMesh);
+
+                // Synchronize animation
+                function animateAir() {
+                    airMaterial.uniforms.time.value = performance.now() * 0.002; // Animation speed
+                    requestAnimationFrame(animateAir);
+                }
+
+                animateAir();
+            }
+
+            // Call this for each tree
+            treePositions.forEach(tree => createTreeAirCurrent(tree));
+
+            // Helper function to create a straight line segment between two points
+            function createLineSegment(line, material) {
+                const segmentLength = line.start.distanceTo(line.end);
+                const radius = 0.02; // Thin lines
+                const cylinderGeometry = new THREE.CylinderGeometry(radius, radius, segmentLength, 16, 1, true);
+
+                const cylinderMesh = new THREE.Mesh(cylinderGeometry, material);
+
+                // Align cylinder to the segment direction
+                const midPoint = new THREE.Vector3().addVectors(line.start, line.end).multiplyScalar(0.5);
+                cylinderMesh.position.copy(midPoint);
+
+                const direction = new THREE.Vector3().subVectors(line.end, line.start).normalize();
+                const axis = new THREE.Vector3(0, 1, 0); // Default up direction
+                const quaternion = new THREE.Quaternion().setFromUnitVectors(axis, direction);
+                cylinderMesh.quaternion.copy(quaternion);
+
+                return cylinderMesh;
+            }
+
+
+
+            // Helper function to create random glowing dots across the map
+            function createRandomGlowDots(density, group) {
+                const dotMaterial = new THREE.MeshPhysicalMaterial({
+                    color: 0xffff00,  // Bright yellow for dots
+                    emissive: new THREE.Color(0xffff00),
+                    emissiveIntensity: 1.0, // Initial intensity for dots
+                    transparent: true,
+                    opacity: 0.9,
+                    blending: THREE.AdditiveBlending // Neon-like additive blending
+                });
+
+                const dotGeometry = new THREE.SphereGeometry(0.15, 8, 8); // Base dot geometry
+                const dotMesh = new THREE.InstancedMesh(dotGeometry, dotMaterial, density);
+                dotMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); // Optimize for dynamic updates
+
+                const dummy = new THREE.Object3D();
+
+                for (let i = 0; i < density; i++) {
+                    const position = getRandomPosition(forestRadius, pathwayPointsSampled, chunkSize * 4);
+                    const y = 0.05 + Math.random() * 2; // Slightly above ground with random height variation
+
+                    dummy.position.set(position.x, y, position.z);
+                    dummy.updateMatrix();
+                    dotMesh.setMatrixAt(i, dummy.matrix);
+                }
+
+                dotMesh.instanceMatrix.needsUpdate = true;
+                group.add(dotMesh);
+            }
+
+            // Helper function to get a random nearby node for branching
+            function getRandomNearbyNode(currentNode) {
+                const potentialNodes = treePositions.filter(node =>
+                    node !== currentNode &&
+                    node.position.distanceTo(currentNode.position) < maxEdgeLength &&
+                    (node.connections < maxLinesPerNode)
+                );
+                if (potentialNodes.length === 0) return null;
+                return potentialNodes[Math.floor(Math.random() * potentialNodes.length)];
+            }
+
+            // Helper function to check if a point is too close to any tree
+            function isPointTooCloseToTree(point, minDistance, startNode, targetNode) {
+                for (let tree of treePositions) {
+                    if (tree === startNode || tree === targetNode) continue;
+                    const treeRadius = 1.0 * tree.scale; // Approximate tree base radius based on scale
+                    if (point.distanceTo(tree.position) < minDistance + treeRadius) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // Helper function to check if a line is too close to any tree
+            function isLineTooCloseToTrees(line, minDistance, startNode, targetNode) {
+                const tempVec = new THREE.Vector3();
+                for (let tree of treePositions) {
+                    if (tree === startNode || tree === targetNode) continue;
+                    const treeRadius = 1.0 * tree.scale; // Approximate tree base radius based on scale
+                    line.closestPointToPoint(tree.position, true, tempVec);
+                    const distance = tempVec.distanceTo(tree.position);
+                    if (distance < minDistance + treeRadius) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+        // Create particles along the lines
+        function createLineParticles() {
+            const particlesPerLine = 20; // Number of particles per line segment
+            const totalParticles = lineSegments.length * particlesPerLine;
+
+            const particlePositions = new Float32Array(totalParticles * 3);
+            const particleSizes = new Float32Array(totalParticles);
+
+            let index = 0;
+
+            for (let i = 0; i < lineSegments.length; i++) {
+                const line = lineSegments[i];
+
+                for (let j = 0; j < particlesPerLine; j++) {
+                    const t = j / particlesPerLine;
+                    const position = new THREE.Vector3().lerpVectors(line.start, line.end, t);
+                    particlePositions[index * 3] = position.x;
+                    particlePositions[index * 3 + 1] = position.y + 0.02; // Slightly above the line
+                    particlePositions[index * 3 + 2] = position.z;
+
+                    particleSizes[index] = 0.5 + Math.random() * 0.5; // Small sizes
+
+                    index++;
+                }
+            }
+
+            const particleGeometry = new THREE.BufferGeometry();
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+            particleGeometry.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+
+            const particlesMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    color: { value: new THREE.Color(0xffff00) },
+                    pointTexture: { value: textureLoader.load('https://threejs.org/examples/textures/sprites/disc.png') },
+                },
+                vertexShader: `
+                        attribute float size;
+                        varying float vSize;
+
+                        void main() {
+                            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                            float dist = length(mvPosition.xyz);
+                            vSize = size / dist * 100.0; // Adjust scaling factor as needed
+                            gl_PointSize = vSize;
+                            gl_Position = projectionMatrix * mvPosition;
+                        }
+                    `,
+                fragmentShader: `
+                        uniform vec3 color;
+                        uniform sampler2D pointTexture;
+                        varying float vSize;
+
+                        void main() {
+                            gl_FragColor = vec4(color, 1.0);
+                            gl_FragColor = gl_FragColor * texture2D(pointTexture, gl_PointCoord);
+                        }
+                    `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+            });
+
+            const particles = new THREE.Points(particleGeometry, particlesMaterial);
+            scene.add(particles);
+        }
+
+        // Function to create particles over the trees
+        function createTreeParticles() {
+            const particleCount = treePositions.length * 50; // Number of particles per tree
+            const particlePositions = new Float32Array(particleCount * 3);
+            const particleSizes = new Float32Array(particleCount);
+
+            let index = 0;
+
+            treePositions.forEach(tree => {
+                const treeHeight = tree.scale * 10; // Approximate tree height
+
+                for (let i = 0; i < 50; i++) {
+                    const x = tree.position.x + (Math.random() - 0.5) * 2 * tree.scale; // Random position around tree
+                    const y = tree.position.y + Math.random() * treeHeight; // Random height up the tree
+                    const z = tree.position.z + (Math.random() - 0.5) * 2 * tree.scale;
+
+                    particlePositions[index * 3] = x;
+                    particlePositions[index * 3 + 1] = y;
+                    particlePositions[index * 3 + 2] = z;
+
+                    particleSizes[index] = 0.5 + Math.random() * 0.5; // Small sizes
+
+                    index++;
+                }
+            });
+
+            const particleGeometry = new THREE.BufferGeometry();
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+            particleGeometry.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+
+            const particlesMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    color: { value: new THREE.Color(0xffff00) },
+                    pointTexture: { value: textureLoader.load('https://threejs.org/examples/textures/sprites/disc.png') },
+                },
+                vertexShader: `
+                        attribute float size;
+                        varying float vSize;
+
+                        void main() {
+                            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                            float dist = length(mvPosition.xyz);
+                            vSize = size / dist * 100.0; // Adjust scaling factor as needed
+                            gl_PointSize = vSize;
+                            gl_Position = projectionMatrix * mvPosition;
+                        }
+                    `,
+                fragmentShader: `
+                        uniform vec3 color;
+                        uniform sampler2D pointTexture;
+                        varying float vSize;
+
+                        void main() {
+                            gl_FragColor = vec4(color, 1.0);
+                            gl_FragColor = gl_FragColor * texture2D(pointTexture, gl_PointCoord);
+                        }
+                    `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+            });
+
+            const particles = new THREE.Points(particleGeometry, particlesMaterial);
+            scene.add(particles);
+        }
+
+        // Function to create ground fog
+        function createGroundFog() {
+            const fogGeometry = new THREE.PlaneGeometry(1000, 1000);
+            const fogMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    color: { value: new THREE.Color(0x003366) },
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                        varying vec2 vUv;
+                        void main() {
+                            vUv = uv;
+                            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                            gl_Position = projectionMatrix * mvPosition;
+                        }
+                    `,
+                fragmentShader: `
+                        uniform vec3 color;
+                        uniform float time;
+                        varying vec2 vUv;
+                        void main() {
+                            float alpha = 0.2 + 0.1 * sin(10.0 * vUv.x + time);
+                            gl_FragColor = vec4(color, alpha);
+                        }
+                    `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            });
+
+            const fogPlane = new THREE.Mesh(fogGeometry, fogMaterial);
+            fogPlane.rotation.x = -Math.PI / 2;
+            fogPlane.position.y = 2; // Slightly above the ground
+            scene.add(fogPlane);
+
+            // Animate the fog
+            function animateFog() {
+                fogMaterial.uniforms.time.value = performance.now() * 0.001;
+                requestAnimationFrame(animateFog);
+            }
+
+            animateFog();
+        }
+
+        function getChunksInRange(position, range) {
+            const minX = Math.floor((position.x - range + forestRadius) / chunkSize);
+            const maxX = Math.floor((position.x + range + forestRadius) / chunkSize);
+            const minZ = Math.floor((position.z - range + forestRadius) / chunkSize);
+            const maxZ = Math.floor((position.z + range + forestRadius) / chunkSize);
+
+            const chunksInRange = [];
+            for (let x = minX; x <= maxX; x++) {
+                for (let z = minZ; z <= maxZ; z++) {
+                    const chunkIndex = `${x}_${z}`;
+                    chunksInRange.push(chunkIndex);
+                }
+            }
+            return chunksInRange;
+        }
+
+        let initialChunksLoaded = false;
+        const initialChunkRange = 2; // Number of chunks to load before showing the scene
+
+        function loadInitialChunks() {
+            const range = initialChunkRange * chunkSize;
+            const cameraPosition = camera.position;
+            const chunksInRange = getChunksInRange(cameraPosition, range);
+
+            let chunksToLoad = chunksInRange.filter(chunkIndex => chunks[chunkIndex]);
+            let loadedCount = 0;
+            const totalChunks = chunksToLoad.length;
+
+            // Function to update the progress bar
+            function updateProgress() {
+                loadedCount++;
+                const progress = (loadedCount / totalChunks) * 100;
+                progressBarFill.style.width = `${progress}%`;
+
+                if (loadedCount === totalChunks) {
+                    initialChunksLoaded = true;
+                    hideLoadingScreen();
+                }
+            }
+
+            // Load chunks sequentially to prevent blocking
+            function loadNextChunk() {
+                if (chunksToLoad.length === 0) return;
+
+                const chunkIndex = chunksToLoad.shift();
+                loadChunk(chunkIndex);
+                updateProgress();
+
+                // Use setTimeout to prevent blocking the main thread
+                setTimeout(loadNextChunk, 0);
+            }
+
+            loadNextChunk();
+        }
+
+        function hideLoadingScreen() {
+            loadingScreen.style.display = 'none';
+            toggleViewBtn.style.display = 'block';
+            // Start the animation loop
+            animate();
+        }
+
+        // Tree instancing with fewer meshes by grouping them into fewer instanced meshes
+        function loadChunk(chunkIndex) {
+            const chunk = chunks[chunkIndex];
+            if (!chunk || chunk.meshes.length > 0) return;
+
+            if (!treeModel) return;
+
+            const instancesByGeometry = {};
+            const instancedMeshGroup = new THREE.Group();
+
+            chunk.trees.forEach(treeData => {
+                const geoIndex = treeData.geometryIndex;
+                if (!instancesByGeometry[geoIndex]) {
+                    instancesByGeometry[geoIndex] = [];
+                }
+                instancesByGeometry[geoIndex].push(treeData);
+            });
+
+            Object.keys(instancesByGeometry).forEach(geoIndex => {
+                const geometry = geometries[geoIndex];
+                const material = materials[geoIndex].clone();
+                material.transparent = true; // Enable transparency for fade-in
+                material.opacity = 1; // Start invisible
+
+                const treeInstances = instancesByGeometry[geoIndex];
+                const instancedMesh = new THREE.InstancedMesh(geometry, material, treeInstances.length);
+
+                const dummy = new THREE.Object3D();
+                treeInstances.forEach((treeData, i) => {
+                    dummy.position.copy(treeData.position);
+                    dummy.scale.set(treeData.scale, treeData.scale, treeData.scale);
+                    dummy.rotation.y = treeData.rotationY;
+                    dummy.updateMatrix();
+                    instancedMesh.setMatrixAt(i, dummy.matrix);
+                });
+
+                instancedMeshGroup.add(instancedMesh);
+                chunk.meshes.push(instancedMesh);
+
+
+                // Add fade-in animation
+                const fadeInterval = setInterval(() => {
+                    material.opacity += 0.5; // Gradually increase opacity 
+                    if (material.opacity >= 1) {
+                        material.opacity = 1;
+                        clearInterval(fadeInterval);
+                    }
+                }, 50);
+            });
+
+            scene.add(instancedMeshGroup);
+            loadedChunks[chunkIndex] = true;
+        }
+
+        function unloadChunk(chunkIndex) {
+            const chunk = chunks[chunkIndex];
+            if (chunk && chunk.meshes.length > 0) {
+                chunk.meshes.forEach(mesh => {
+                    scene.remove(mesh);
+                    mesh.geometry.dispose();
+                    mesh.material.dispose();
+                });
+                chunk.meshes = [];
+            }
+            delete loadedChunks[chunkIndex];
+        }
+
+        function updateChunks() {
+            const chunkRange = 4; // Number of chunks to load around the camera
+            const backgroundChunkRange = chunkRange + 1; // Load one extra chunk in background
+            const range = chunkRange * chunkSize;
+            const backgroundRange = backgroundChunkRange * chunkSize;
+
+            const cameraPosition = camera.position;
+            const chunksInRange = getChunksInRange(cameraPosition, range);
+            const backgroundChunksInRange = getChunksInRange(cameraPosition, backgroundRange);
+
+            const chunksToLoad = [];
+            const chunksToUnload = [];
+
+            // Determine chunks in render range that need loading
+            chunksInRange.forEach(chunkIndex => {
+                if (!loadedChunks[chunkIndex] && chunks[chunkIndex]) {
+                    chunksToLoad.push(chunkIndex);
+                }
+            });
+
+            // Check which chunks need background loading
+            backgroundChunksInRange.forEach(chunkIndex => {
+                if (!loadedChunks[chunkIndex] && chunks[chunkIndex] && !chunksToLoad.includes(chunkIndex)) {
+                    chunksToLoad.push(chunkIndex); // Include for background loading
+                }
+            });
+
+            // Determine which chunks to unload
+            Object.keys(loadedChunks).forEach(chunkIndex => {
+                if (!backgroundChunksInRange.includes(chunkIndex)) {
+                    unloadChunk(chunkIndex);
+                }
+            });
+
+            // Load and unload chunks
+            chunksToLoad.forEach(chunkIndex => loadChunk(chunkIndex));
+        }
+
+        // Particles distributed throughout the scene
+        function createSceneParticles() {
+            const particleCount = 10000; // Increased particle count for more stars
+            const particlePositions = new Float32Array(particleCount * 3);
+            const particleSizes = new Float32Array(particleCount);
+
+            for (let i = 0; i < particleCount; i++) {
+                const position = getRandomPosition(forestRadius, pathwayPointsSampled, chunkSize * 4);
+                particlePositions[i * 3] = position.x;
+                particlePositions[i * 3 + 1] = Math.random() * 80; // Height variation from 0 to 80
+                particlePositions[i * 3 + 2] = position.z;
+
+                particleSizes[i] = 0.5 + Math.random() * 0.5; // Small sizes between 0.5 and 1
+            }
+
+            const particleGeometry = new THREE.BufferGeometry();
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+            particleGeometry.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+
+            const particlesMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    color: { value: new THREE.Color(0xffff00) },
+                    pointTexture: { value: textureLoader.load('https://threejs.org/examples/textures/sprites/disc.png') },
+                },
+                vertexShader: `
+                        attribute float size;
+                        varying float vSize;
+
+                        void main() {
+                            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                            float dist = length(mvPosition.xyz);
+                            vSize = size / dist * 100.0; // Adjust scaling factor as needed
+                            gl_PointSize = vSize;
+                            gl_Position = projectionMatrix * mvPosition;
+                        }
+                    `,
+                fragmentShader: `
+                        uniform vec3 color;
+                        uniform sampler2D pointTexture;
+                        varying float vSize;
+
+                        void main() {
+                            gl_FragColor = vec4(color, 1.0);
+                            gl_FragColor = gl_FragColor * texture2D(pointTexture, gl_PointCoord);
+                        }
+                    `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+            });
+
+            const particles = new THREE.Points(particleGeometry, particlesMaterial);
+            scene.add(particles);
+        }
+
+        // Call the function to create scene particles
+        createSceneParticles();
+        function createGroundParticles() {
+            const groundParticleCount = 5000; // Adjust based on performance
+            const groundParticlePositions = new Float32Array(groundParticleCount * 3);
+            const groundParticleSizes = new Float32Array(groundParticleCount);
+
+            for (let i = 0; i < groundParticleCount; i++) {
+                const x = (Math.random() - 0.5) * forestRadius * 2; // Spread across ground area
+                const y = 0.5 + Math.random() * 2; // Floating slightly above the ground
+                const z = (Math.random() - 0.5) * forestRadius * 2;
+
+                groundParticlePositions[i * 3] = x;
+                groundParticlePositions[i * 3 + 1] = y;
+                groundParticlePositions[i * 3 + 2] = z;
+
+                groundParticleSizes[i] = 1.0 + Math.random(); // Bigger particles
+            }
+
+            const particleGeometry = new THREE.BufferGeometry();
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(groundParticlePositions, 3));
+            particleGeometry.setAttribute('size', new THREE.BufferAttribute(groundParticleSizes, 1));
+
+            const particleMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    color: { value: new THREE.Color(0xffff00) }, // Match color to other particles
+                    pointTexture: { value: textureLoader.load('https://threejs.org/examples/textures/sprites/disc.png') },
+                },
+                vertexShader: `
+            attribute float size;
+            varying float vSize;
+
+            void main() {
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                float dist = length(mvPosition.xyz);
+                vSize = size / dist * 100.0; // Adjust scaling factor as needed
+                gl_PointSize = vSize;
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `,
+                fragmentShader: `
+            uniform vec3 color;
+            uniform sampler2D pointTexture;
+            varying float vSize;
+
+            void main() {
+                gl_FragColor = vec4(color, 1.0);
+                gl_FragColor = gl_FragColor * texture2D(pointTexture, gl_PointCoord);
+            }
+        `,
+                transparent: true,
+                blending: THREE.AdditiveBlending, // Glow effect
+                depthWrite: false,
+            });
+
+            const particles = new THREE.Points(particleGeometry, particleMaterial);
+            scene.add(particles);
+        }
+
+        // Call the function
+        createGroundParticles();
+
+
+        // Mouse movement variables for camera
+        const mouse = new THREE.Vector2(0, 0); // Centered mouse position
+        document.addEventListener('mousemove', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = (event.clientY / window.innerHeight) * 2 - 1;
+        });
+
+        // Variables for camera rotation
+        let currentRotationX = 0;
+        let currentRotationY = 0;
+
+        // Animation loop with pathway camera movement
+        let progress = 0;
+        const maxScrollSpeed = 0.0028; // Slower scroll speed for more time to load chunks
+        let targetProgress = 0;
+
+        window.addEventListener('wheel', (event) => {
+            // Adjust target progress within limits and based on scroll speed
+            if (event.deltaY > 0) targetProgress += maxScrollSpeed;
+            else targetProgress -= maxScrollSpeed;
+            targetProgress = THREE.MathUtils.clamp(targetProgress, 0, 1);
+        });
+
+        // Resize event listener
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Toggle button for view mode
+        let isPathwayView = true;
+        toggleViewBtn.addEventListener('click', () => {
+            isPathwayView = !isPathwayView;
+            toggleViewBtn.textContent = isPathwayView ? 'Switch to Overview' : 'Switch to Pathway View';
+            controls.enabled = !isPathwayView;
+
+            // Adjust fog parameters based on the view mode
+            if (isPathwayView) {
+                scene.fog.near = fogNear;
+                scene.fog.far = fogFar;
+            } else {
+                scene.fog.near = camera.near;
+                scene.fog.far = camera.far;
+            }
+
+            ambientLight.intensity = isPathwayView ? 0.5 : 1.5;
+            moonlight.intensity = isPathwayView ? 1 : 1.5;
+        });
+
+        // Main animation loop
+        function animate() {
+            stats.begin();
+            requestAnimationFrame(animate);
+
+            // Update controls or animation progress
+            if (isPathwayView) {
+                progress += (targetProgress - progress) * 0.05;
+                const cameraPosition = pathwayCurve.getPointAt(progress);
+                camera.position.set(cameraPosition.x, cameraPosition.y + 5, cameraPosition.z);
+
+                const lookAtPosition = pathwayCurve.getPointAt((progress + 0.01) % 1);
+                lookAtPosition.y = camera.position.y; // Ensure the camera looks forward
+
+                // Calculate the default direction vector
+                const defaultDirection = new THREE.Vector3().subVectors(lookAtPosition, camera.position).normalize();
+
+                // Target rotation angles in radians
+                const maxRotationAngle = THREE.MathUtils.degToRad(30); // 30 degrees in radians
+
+                // Apply sensitivity to make movement slower
+                const sensitivity = 0.5; // Adjust sensitivity as needed
+                const targetRotationX = -mouse.y * maxRotationAngle * sensitivity;
+                const targetRotationY = -mouse.x * maxRotationAngle * sensitivity;
+
+                // Apply resistance (smoothing)
+                const resistance = 0.05; // Adjust resistance as needed
+                currentRotationX += (targetRotationX - currentRotationX) * resistance;
+                currentRotationY += (targetRotationY - currentRotationY) * resistance;
+
+                // Create quaternions for rotations
+                const quaternion = new THREE.Quaternion();
+
+                // Rotate around Y axis (up vector)
+                const quaternionY = new THREE.Quaternion();
+                quaternionY.setFromAxisAngle(new THREE.Vector3(0, 1, 0), currentRotationY);
+
+                // Rotate around X axis (right vector)
+                const right = new THREE.Vector3().crossVectors(defaultDirection, camera.up).normalize();
+                const quaternionX = new THREE.Quaternion().setFromAxisAngle(right, currentRotationX);
+
+                // Combine rotations
+                quaternion.multiply(quaternionY).multiply(quaternionX);
+
+                // Apply rotation to the direction vector
+                const rotatedDirection = defaultDirection.clone().applyQuaternion(quaternion);
+
+                // Set the camera's lookAt position
+                const lookAtPoint = camera.position.clone().add(rotatedDirection);
+                camera.lookAt(lookAtPoint);
+            } else {
+                controls.update();
+            }
+
+            // Update chunks if treeModel is loaded
+            if (treeModel) {
+                updateChunks();
+            }
+
+            // Render the scene using composer
+            composer.render();
+            stats.end();
+        }
+
+        // Do not start the animation loop until initial chunks are loaded
+        // animate();
+    </script>
+</body>
+
+</html>
